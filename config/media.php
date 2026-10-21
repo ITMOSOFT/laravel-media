@@ -43,6 +43,14 @@ return [
         'application/pdf',
     ],
 
+    'allowed_extensions' => [
+        'image/jpeg' => ['jpg', 'jpeg'],
+        'image/png' => ['png'],
+        'image/webp' => ['webp'],
+        'image/gif' => ['gif'],
+        'application/pdf' => ['pdf'],
+    ],
+
     /*
     |--------------------------------------------------------------------------
     | File Deletion

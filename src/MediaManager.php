@@ -26,6 +26,12 @@ class MediaManager
             );
         }
 
+        if (trim($collection) === '') {
+            throw new UnexpectedValueException(
+                'The media collection name cannot be empty.'
+            );
+        }
+
         if (! $file->isValid()) {
             throw new UnexpectedValueException(
                 'The uploaded file is invalid.'
@@ -63,11 +69,20 @@ class MediaManager
 
         $extension = $file->guessExtension();
 
-        if (! is_string($extension) || $extension === '') {
+        $extensionsByMimeType = config('media.allowed_extensions', []);
+        $allowedExtensions = $extensionsByMimeType[$mimeType] ?? [];
+
+        if (
+            ! is_string($extension)
+            || ! is_array($allowedExtensions)
+            || ! in_array(strtolower($extension), $allowedExtensions, true)
+        ) {
             throw new UnexpectedValueException(
-                'Unable to determine a safe file extension.'
+                'The uploaded file extension does not match its MIME type.'
             );
         }
+
+        $extension = strtolower($extension);
 
         $disk = config('media.disk', 'local');
         $uuid = (string) Str::uuid();

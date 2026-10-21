@@ -9,6 +9,7 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
+use ItmoSoft\Media\MediaManager;
 use ItmoSoft\Media\Models\Media;
 use ItmoSoft\Media\Tests\Fixtures\TestProduct;
 use ItmoSoft\Media\Tests\TestCase;
@@ -32,6 +33,49 @@ class MediaUploadTest extends TestCase
             $table->string('name');
             $table->timestamps();
         });
+    }
+
+    public function test_it_does_not_create_a_media_record_when_storage_fails(): void
+    {
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $file = UploadedFile::fake()->create(
+            'document.pdf',
+            10,
+            'application/pdf'
+        );
+
+        config()->set('media.disk', 'local');
+        config()->set('media.allowed_mime_types', ['application/pdf']);
+
+        $filesystem = \Mockery::mock(Filesystem::class);
+        $filesystem->shouldReceive('putFileAs')
+            ->once()
+            ->andThrow(new \RuntimeException('Simulated storage failure.'));
+
+        Storage::shouldReceive('disk')
+            ->once()
+            ->with('local')
+            ->andReturn($filesystem);
+
+        try {
+            app(MediaManager::class)->upload(
+                $product,
+                $file,
+                'documents'
+            );
+
+            $this->fail('Expected storage failure to be propagated.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame(
+                'Simulated storage failure.',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertDatabaseCount('media', 0);
     }
 
     public function test_it_uploads_a_file_and_creates_a_media_record(): void
@@ -334,5 +378,71 @@ class MediaUploadTest extends TestCase
 
         Storage::disk('local')->assertExists($path);
         $this->assertDatabaseHas('media', ['id' => $media->id]);
+    }
+
+    public function test_it_rejects_an_empty_collection_name(): void
+    {
+        Storage::fake('local');
+
+        config()->set('media.disk', 'local');
+        config()->set('media.allowed_mime_types', ['application/pdf']);
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $file = UploadedFile::fake()->create(
+            'document.pdf',
+            10,
+            'application/pdf'
+        );
+
+        try {
+            app(MediaManager::class)->upload($product, $file, '');
+
+            $this->fail('Expected an empty collection name to be rejected.');
+        } catch (\UnexpectedValueException $exception) {
+            $this->assertSame(
+                'The media collection name cannot be empty.',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertDatabaseCount('media', 0);
+        $this->assertSame([], Storage::disk('local')->allFiles('media'));
+    }
+
+    public function test_it_rejects_a_whitespace_only_collection_name(): void
+    {
+        Storage::fake('local');
+
+        config()->set('media.disk', 'local');
+        config()->set('media.allowed_mime_types', ['application/pdf']);
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $file = UploadedFile::fake()->create(
+            'document.pdf',
+            10,
+            'application/pdf'
+        );
+
+        try {
+            app(MediaManager::class)->upload($product, $file, '   ');
+
+            $this->fail(
+                'Expected a whitespace-only collection name to be rejected.'
+            );
+        } catch (\UnexpectedValueException $exception) {
+            $this->assertSame(
+                'The media collection name cannot be empty.',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertDatabaseCount('media', 0);
+        $this->assertSame([], Storage::disk('local')->allFiles('media'));
     }
 }
