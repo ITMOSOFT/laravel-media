@@ -633,4 +633,160 @@ class MediaUploadTest extends TestCase
             'path' => $oldPath,
         ]);
     }
+
+    public function test_it_reorders_media_within_a_collection(): void
+    {
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $first = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'first.pdf',
+                'first document'
+            )
+        )->toCollection('gallery');
+
+        $second = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'second.pdf',
+                'second document'
+            )
+        )->toCollection('gallery');
+
+        $third = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'third.pdf',
+                'third document'
+            )
+        )->toCollection('gallery');
+
+        $product->reorderMedia([
+            $third->id,
+            $first->id,
+            $second->id,
+        ], 'gallery');
+
+        $this->assertSame(
+            [$third->id, $first->id, $second->id],
+            $product->getMedia('gallery')->pluck('id')->all()
+        );
+
+        $this->assertSame(1, $third->fresh()->order_column);
+        $this->assertSame(2, $first->fresh()->order_column);
+        $this->assertSame(3, $second->fresh()->order_column);
+    }
+
+    public function test_it_rejects_media_from_another_collection_when_reordering(): void
+    {
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $galleryMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'gallery.pdf',
+                'gallery document'
+            )
+        )->toCollection('gallery');
+
+        $coverMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'cover.pdf',
+                'cover document'
+            )
+        )->toCollection('cover');
+
+        $this->expectException(\InvalidArgumentException::class);
+
+        $product->reorderMedia([
+            $galleryMedia->id,
+            $coverMedia->id,
+        ], 'gallery');
+    }
+
+    public function test_it_rejects_duplicate_media_ids_when_reordering(): void
+    {
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $media = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'document.pdf',
+                'document content'
+            )
+        )->toCollection('gallery');
+
+        $this->expectException(\InvalidArgumentException::class);
+
+        $product->reorderMedia([
+            $media->id,
+            $media->id,
+        ], 'gallery');
+    }
+
+    public function test_it_rejects_media_belonging_to_another_model_when_reordering(): void
+    {
+        $product = TestProduct::query()->create([
+            'name' => 'Product A',
+        ]);
+
+        $anotherProduct = TestProduct::query()->create([
+            'name' => 'Product B',
+        ]);
+
+        $productMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'product-a.pdf',
+                'product a'
+            )
+        )->toCollection('gallery');
+
+        $anotherProductMedia = $anotherProduct->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'product-b.pdf',
+                'product b'
+            )
+        )->toCollection('gallery');
+
+        $this->expectException(\InvalidArgumentException::class);
+
+        $product->reorderMedia([
+            $productMedia->id,
+            $anotherProductMedia->id,
+        ], 'gallery');
+    }
+
+    public function test_it_assigns_order_independently_per_collection(): void
+    {
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $firstGalleryMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'gallery-one.pdf',
+                'gallery one'
+            )
+        )->toCollection('gallery');
+
+        $coverMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'cover.pdf',
+                'cover'
+            )
+        )->toCollection('cover');
+
+        $secondGalleryMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'gallery-two.pdf',
+                'gallery two'
+            )
+        )->toCollection('gallery');
+
+        $this->assertSame(1, $firstGalleryMedia->fresh()->order_column);
+        $this->assertSame(1, $coverMedia->fresh()->order_column);
+        $this->assertSame(2, $secondGalleryMedia->fresh()->order_column);
+    }
 }

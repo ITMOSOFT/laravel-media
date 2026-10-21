@@ -119,6 +119,9 @@ class MediaManager
                 'disk' => $disk,
                 'mime_type' => $mimeType,
                 'size' => $size,
+                'order_column' => (int) $model->media()
+                    ->where('collection_name', $collection)
+                    ->max('order_column') + 1,
             ]);
         } catch (Throwable $exception) {
             try {

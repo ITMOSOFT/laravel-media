@@ -54,6 +54,43 @@ trait HasMedia
         return $newMedia;
     }
 
+    public function reorderMedia(
+        array $mediaIds,
+        string $collection = 'default'
+    ): void {
+        if (trim($collection) === '') {
+            throw new \InvalidArgumentException(
+                'The media collection name cannot be empty.'
+            );
+        }
+
+        if (count($mediaIds) !== count(array_unique($mediaIds))) {
+            throw new \InvalidArgumentException(
+                'Duplicate media IDs are not allowed.'
+            );
+        }
+
+        DB::transaction(function () use ($mediaIds, $collection): void {
+            $media = $this->media()
+                ->where('collection_name', $collection)
+                ->whereIn('id', $mediaIds)
+                ->get()
+                ->keyBy('id');
+
+            if ($media->count() !== count($mediaIds)) {
+                throw new \InvalidArgumentException(
+                    'One or more media IDs do not belong to this model and collection.'
+                );
+            }
+
+            foreach (array_values($mediaIds) as $index => $mediaId) {
+                $media->get($mediaId)->update([
+                    'order_column' => $index + 1,
+                ]);
+            }
+        });
+    }
+
     public function addMedia(UploadedFile $file): PendingMedia
     {
         return new PendingMedia($this, $file);
