@@ -789,4 +789,156 @@ class MediaUploadTest extends TestCase
         $this->assertSame(1, $coverMedia->fresh()->order_column);
         $this->assertSame(2, $secondGalleryMedia->fresh()->order_column);
     }
+
+    public function test_it_rejects_uploads_when_collection_limit_is_reached(): void
+    {
+        config()->set('media.collections.cover', [
+            'max_files' => 1,
+            'on_limit' => 'reject',
+        ]);
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'first.pdf',
+                'first document'
+            )
+        )->toCollection('cover');
+
+        $this->expectException(\RuntimeException::class);
+
+        $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'second.pdf',
+                'second document'
+            )
+        )->toCollection('cover');
+    }
+
+    public function test_it_replaces_existing_media_when_collection_limit_is_reached(): void
+    {
+        config()->set('media.collections.cover', [
+            'max_files' => 1,
+            'on_limit' => 'replace',
+        ]);
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $oldMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'old.pdf',
+                'old document'
+            )
+        )->toCollection('cover');
+
+        $newMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'new.pdf',
+                'new document'
+            )
+        )->toCollection('cover');
+
+        $this->assertDatabaseCount('media', 1);
+        $this->assertDatabaseHas('media', [
+            'id' => $newMedia->id,
+            'collection_name' => 'cover',
+        ]);
+        $this->assertDatabaseMissing('media', [
+            'id' => $oldMedia->id,
+        ]);
+    }
+
+    public function test_it_allows_uploads_within_collection_limit(): void
+    {
+        config()->set('media.collections.gallery', [
+            'max_files' => 3,
+            'on_limit' => 'reject',
+        ]);
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $first = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'first.pdf',
+                'first document'
+            )
+        )->toCollection('gallery');
+
+        $second = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'second.pdf',
+                'second document'
+            )
+        )->toCollection('gallery');
+
+        $this->assertDatabaseCount('media', 2);
+        $this->assertSame(1, $first->fresh()->order_column);
+        $this->assertSame(2, $second->fresh()->order_column);
+    }
+
+    public function test_it_preserves_existing_media_when_collection_replacement_storage_fails(): void
+    {
+        config()->set('media.collections.cover', [
+            'max_files' => 1,
+            'on_limit' => 'replace',
+        ]);
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $oldMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'old.pdf',
+                'old document content'
+            )
+        )->toCollection('cover');
+
+        $oldPath = $oldMedia->path;
+
+        $filesystem = \Mockery::mock(Filesystem::class);
+
+        $filesystem->shouldReceive('putFileAs')
+            ->once()
+            ->andThrow(new \RuntimeException('Simulated storage failure.'));
+
+        $filesystem->shouldReceive('delete')
+            ->once()
+            ->with(\Mockery::type('string'))
+            ->andReturn(true);
+
+        Storage::shouldReceive('disk')
+            ->once()
+            ->with(config('media.disk', 'local'))
+            ->andReturn($filesystem);
+
+        try {
+            $product->addMedia(
+                UploadedFile::fake()->createWithContent(
+                    'new.pdf',
+                    'new document content'
+                )
+            )->toCollection('cover');
+
+            $this->fail('Expected storage failure to be propagated.');
+        } catch (\RuntimeException $exception) {
+            if ($exception->getMessage() !== 'Simulated storage failure.') {
+                throw $exception;
+            }
+        }
+
+        $this->assertDatabaseCount('media', 1);
+
+        $this->assertDatabaseHas('media', [
+            'id' => $oldMedia->id,
+            'path' => $oldPath,
+        ]);
+    }
 }

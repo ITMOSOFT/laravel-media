@@ -32,6 +32,30 @@ class MediaManager
             );
         }
 
+        $collectionConfig = config(
+            "media.collections.{$collection}",
+            []
+        );
+
+        $maxFiles = $collectionConfig['max_files'] ?? null;
+        $onLimit = $collectionConfig['on_limit'] ?? 'reject';
+
+        if ($maxFiles !== null && (! is_int($maxFiles) || $maxFiles < 1)) {
+            throw new \InvalidArgumentException(
+                'The collection max_files setting must be a positive integer or null.'
+            );
+        }
+
+        if (! in_array($onLimit, ['reject', 'replace'], true)) {
+            throw new \InvalidArgumentException(
+                'The collection on_limit setting must be reject or replace.'
+            );
+        }
+
+        $currentCount = $model->media()
+            ->where('collection_name', $collection)
+            ->count();
+
         if (! $file->isValid()) {
             throw new UnexpectedValueException(
                 'The uploaded file is invalid.'
@@ -82,6 +106,26 @@ class MediaManager
             );
         }
 
+        $currentMedia = $model->media()
+            ->where('collection_name', $collection)
+            ->get();
+
+        $currentCount = $currentMedia->count();
+
+        $shouldReplace = $maxFiles !== null
+            && $currentCount >= $maxFiles
+            && $onLimit === 'replace';
+
+        if (
+            $maxFiles !== null
+            && $currentCount >= $maxFiles
+            && ! $shouldReplace
+        ) {
+            throw new RuntimeException(
+                "The media collection '{$collection}' has reached its maximum file limit."
+            );
+        }
+
         $extension = strtolower($extension);
 
         $disk = config('media.disk', 'local');
@@ -107,7 +151,7 @@ class MediaManager
                 );
             }
 
-            return $model->media()->create([
+            $newMedia = $model->media()->create([
                 'uuid' => $uuid,
                 'collection_name' => $collection,
                 'name' => pathinfo(
@@ -119,10 +163,20 @@ class MediaManager
                 'disk' => $disk,
                 'mime_type' => $mimeType,
                 'size' => $size,
-                'order_column' => (int) $model->media()
-                    ->where('collection_name', $collection)
-                    ->max('order_column') + 1,
+                'order_column' => $shouldReplace
+                    ? 1
+                    : (int) $model->media()
+                        ->where('collection_name', $collection)
+                        ->max('order_column') + 1,
             ]);
+
+            if ($shouldReplace) {
+                $currentMedia->each(
+                    fn (Media $media) => $media->delete()
+                );
+            }
+
+            return $newMedia;
         } catch (Throwable $exception) {
             try {
                 $storage->delete($storedPath ?: $path);

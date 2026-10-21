@@ -58,4 +58,17 @@ return [
     */
 
     'delete_files_on_model_delete' => true,
+
+    'collections' => [
+        // Example:
+        // 'cover' => [
+        //     'max_files' => 1,
+        //     'on_limit' => 'reject',
+        // ],
+        //
+        // 'gallery' => [
+        //     'max_files' => null,
+        //     'on_limit' => 'reject',
+        // ],
+    ],
 ];
