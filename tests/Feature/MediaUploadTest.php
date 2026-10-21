@@ -495,4 +495,142 @@ class MediaUploadTest extends TestCase
         $this->assertDatabaseCount('media', 0);
         $this->assertSame([], Storage::disk('local')->allFiles('media'));
     }
+
+    public function test_it_replaces_media_in_a_collection(): void
+    {
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $oldMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'old-cover.jpg',
+                'fake image content'
+            )
+        )->toCollection('cover');
+
+        $oldPath = $oldMedia->path;
+
+        $newMedia = $product->replaceMedia(
+            UploadedFile::fake()->createWithContent(
+                'new-cover.jpg',
+                'fake image content'
+            ),
+            'cover'
+        );
+
+        $this->assertDatabaseCount('media', 1);
+        $this->assertDatabaseHas('media', [
+            'id' => $newMedia->id,
+            'collection_name' => 'cover',
+        ]);
+
+        $this->assertNotSame($oldMedia->id, $newMedia->id);
+        $this->assertFalse(
+            Storage::disk($oldMedia->disk)
+                ->exists($oldPath)
+        );
+        $this->assertTrue(
+            Storage::disk($newMedia->disk)
+                ->exists($newMedia->path)
+        );
+    }
+
+    public function test_it_keeps_existing_media_when_replacement_upload_fails(): void
+    {
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $oldMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'old-cover.jpg',
+                'fake image content'
+            )
+        )->toCollection('cover');
+
+        $oldPath = $oldMedia->path;
+
+        config()->set('media.allowed_mime_types', ['application/pdf']);
+
+        try {
+            $product->replaceMedia(
+                UploadedFile::fake()->createWithContent(
+                    'new-cover.jpg',
+                    'fake image content'
+                ),
+                'cover'
+            );
+
+            $this->fail('Expected the replacement upload to fail.');
+        } catch (\UnexpectedValueException) {
+            // The old media should remain untouched.
+        }
+
+        $this->assertDatabaseCount('media', 1);
+        $this->assertDatabaseHas('media', [
+            'id' => $oldMedia->id,
+            'collection_name' => 'cover',
+        ]);
+        $this->assertTrue(
+            Storage::disk($oldMedia->disk)
+                ->exists($oldPath)
+        );
+    }
+
+    public function test_it_keeps_existing_media_when_replacement_storage_fails(): void
+    {
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $oldMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'old-document.pdf',
+                'old document content'
+            )
+        )->toCollection('documents');
+
+        $oldPath = $oldMedia->path;
+
+        $file = UploadedFile::fake()->createWithContent(
+            'new-document.pdf',
+            'new document content'
+        );
+
+        $filesystem = \Mockery::mock(
+            Filesystem::class
+        );
+
+        $filesystem->shouldReceive('putFileAs')
+            ->once()
+            ->andThrow(new \RuntimeException('Simulated storage failure.'));
+
+        $filesystem->shouldReceive('delete')
+            ->once()
+            ->with(\Mockery::type('string'))
+            ->andReturn(true);
+
+        Storage::shouldReceive('disk')
+            ->once()
+            ->with(config('media.disk', 'local'))
+            ->andReturn($filesystem);
+
+        try {
+            $product->replaceMedia($file, 'documents');
+
+            $this->fail('Expected storage failure to be propagated.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame(
+                'Simulated storage failure.',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertDatabaseCount('media', 1);
+        $this->assertDatabaseHas('media', [
+            'id' => $oldMedia->id,
+            'path' => $oldPath,
+        ]);
+    }
 }

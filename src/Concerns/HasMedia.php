@@ -35,6 +35,25 @@ trait HasMedia
         });
     }
 
+    public function replaceMedia(
+        UploadedFile $file,
+        string $collection = 'default'
+    ): Media {
+        if (trim($collection) === '') {
+            throw new \InvalidArgumentException(
+                'The media collection name cannot be empty.'
+            );
+        }
+
+        $newMedia = $this->addMedia($file)->toCollection($collection);
+
+        $this->getMedia($collection)
+            ->reject(fn (Media $media): bool => $media->is($newMedia))
+            ->each(fn (Media $media) => $media->delete());
+
+        return $newMedia;
+    }
+
     public function addMedia(UploadedFile $file): PendingMedia
     {
         return new PendingMedia($this, $file);
