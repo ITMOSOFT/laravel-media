@@ -137,6 +137,7 @@ class MediaManager
         $storage = Storage::disk($disk);
 
         $storedPath = null;
+        $newMedia = null;
 
         try {
             $storedPath = $storage->putFileAs(
@@ -170,6 +171,13 @@ class MediaManager
                         ->max('order_column') + 1,
             ]);
 
+            if (
+                str_starts_with($mimeType, 'image/')
+                && config('media.auto_generate_conversions', false)
+            ) {
+                app(MediaConversionManager::class)->generate($newMedia);
+            }
+
             if ($shouldReplace) {
                 $currentMedia->each(
                     fn (Media $media) => $media->delete()
@@ -178,6 +186,14 @@ class MediaManager
 
             return $newMedia;
         } catch (Throwable $exception) {
+            if ($newMedia instanceof Media) {
+                try {
+                    $newMedia->delete();
+                } catch (Throwable) {
+                    // Preserve the original exception.
+                }
+            }
+
             try {
                 $storage->delete($storedPath ?: $path);
             } catch (Throwable) {

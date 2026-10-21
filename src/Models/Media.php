@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use RuntimeException;
 
 class Media extends Model
 {
@@ -39,7 +40,15 @@ class Media extends Model
         });
 
         static::deleting(function (self $media): void {
-            Storage::disk($media->disk)->delete($media->path);
+            $disk = Storage::disk($media->disk);
+
+            $disk->delete($media->path);
+
+            $conversionDirectory = dirname($media->path).'/conversions';
+
+            foreach ($disk->files($conversionDirectory) as $path) {
+                $disk->delete($path);
+            }
         });
     }
 
@@ -48,9 +57,59 @@ class Media extends Model
         return $this->morphTo();
     }
 
-    public function getUrl(): string
+    /**
+     * Get the original media URL or a generated conversion URL.
+     */
+    public function getUrl(?string $conversion = null): string
     {
-        return Storage::disk($this->disk)->url($this->path);
+        if ($conversion === null) {
+            return Storage::disk($this->disk)->url($this->path);
+        }
+
+        $generated = $this->generated_conversions ?? [];
+
+        if (
+            ! is_array($generated)
+            || ($generated[$conversion] ?? false) !== true
+        ) {
+            throw new RuntimeException(
+                "Media conversion '{$conversion}' has not been generated."
+            );
+        }
+
+        $conversions = config('media.conversions', []);
+        $options = is_array($conversions)
+            ? ($conversions[$conversion] ?? null)
+            : null;
+
+        if (! is_array($options)) {
+            throw new RuntimeException(
+                "Configuration for media conversion '{$conversion}' was not found."
+            );
+        }
+
+        $format = $options['format'] ?? 'webp';
+
+        if (! is_string($format)) {
+            throw new RuntimeException(
+                "Invalid format for media conversion '{$conversion}'."
+            );
+        }
+
+        $extension = $format === 'jpeg' ? 'jpg' : $format;
+
+        $path = dirname($this->path)
+            .'/conversions/'.$conversion.'.'.$extension;
+
+        $disk = Storage::disk($this->disk);
+
+        if (! $disk->exists($path)) {
+            throw new RuntimeException(
+                "The file for media conversion '{$conversion}' does not exist."
+            );
+        }
+
+        return $disk->url($path);
     }
 
     public function getTemporaryUrl(
