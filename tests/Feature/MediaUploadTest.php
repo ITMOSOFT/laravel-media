@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ItmoSoft\Media\Tests\Feature;
 
+use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Event;
@@ -33,6 +34,55 @@ class MediaUploadTest extends TestCase
             $table->string('name');
             $table->timestamps();
         });
+    }
+
+    public function test_it_does_not_create_a_media_record_when_storage_returns_false(): void
+    {
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $file = UploadedFile::fake()->create(
+            'document.pdf',
+            10,
+            'application/pdf'
+        );
+
+        config()->set('media.disk', 'local');
+        config()->set('media.allowed_mime_types', ['application/pdf']);
+
+        $filesystem = \Mockery::mock(Filesystem::class);
+
+        $filesystem->shouldReceive('putFileAs')
+            ->once()
+            ->andReturn(false);
+
+        $filesystem->shouldReceive('delete')
+            ->once()
+            ->with(\Mockery::type('string'))
+            ->andReturn(true);
+
+        Storage::shouldReceive('disk')
+            ->once()
+            ->with('local')
+            ->andReturn($filesystem);
+
+        try {
+            app(MediaManager::class)->upload(
+                $product,
+                $file,
+                'documents'
+            );
+
+            $this->fail('Expected storage failure to be thrown.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame(
+                'Unable to store the uploaded media file.',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertDatabaseCount('media', 0);
     }
 
     public function test_it_does_not_create_a_media_record_when_storage_fails(): void

@@ -92,19 +92,21 @@ class MediaManager
 
         $storage = Storage::disk($disk);
 
-        $storedPath = $storage->putFileAs(
-            $directory,
-            $file,
-            $fileName
-        );
-
-        if ($storedPath === false) {
-            throw new RuntimeException(
-                'Unable to store the uploaded media file.'
-            );
-        }
+        $storedPath = null;
 
         try {
+            $storedPath = $storage->putFileAs(
+                $directory,
+                $file,
+                $fileName
+            );
+
+            if ($storedPath === false) {
+                throw new RuntimeException(
+                    'Unable to store the uploaded media file.'
+                );
+            }
+
             return $model->media()->create([
                 'uuid' => $uuid,
                 'collection_name' => $collection,
@@ -120,9 +122,9 @@ class MediaManager
             ]);
         } catch (Throwable $exception) {
             try {
-                $storage->delete($storedPath);
+                $storage->delete($storedPath ?: $path);
             } catch (Throwable) {
-                // Preserve the original database exception.
+                // Preserve the original exception.
             }
 
             throw $exception;
