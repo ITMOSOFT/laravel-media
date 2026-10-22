@@ -882,6 +882,67 @@ class MediaUploadTest extends TestCase
         )->toCollection('cover');
     }
 
+    public function test_it_preserves_new_media_when_old_media_cleanup_fails(): void
+    {
+        Storage::fake('local');
+        config()->set('media.disk', 'local');
+        config()->set('media.collections.cover', [
+            'max_files' => 1,
+            'on_limit' => 'replace',
+        ]);
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $oldMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'old.pdf',
+                'old document'
+            )
+        )->toCollection('cover');
+
+        $oldPath = $oldMedia->path;
+
+        Media::deleting(function (Media $media) use ($oldMedia): void {
+            if ($media->is($oldMedia)) {
+                throw new \RuntimeException(
+                    'Simulated old-media cleanup failure.'
+                );
+            }
+        });
+
+        try {
+            $product->addMedia(
+                UploadedFile::fake()->createWithContent(
+                    'new.pdf',
+                    'new document'
+                )
+            )->toCollection('cover');
+
+            $this->fail('Expected old-media cleanup to fail.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame(
+                'Simulated old-media cleanup failure.',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertDatabaseHas('media', [
+            'id' => $oldMedia->id,
+        ]);
+
+        $this->assertDatabaseCount('media', 2);
+
+        $newMedia = $product->fresh()->media()
+            ->where('path', '!=', $oldPath)
+            ->first();
+
+        $this->assertNotNull($newMedia);
+
+        Storage::disk('local')->assertExists($newMedia->path);
+    }
+
     public function test_it_replaces_existing_media_when_collection_limit_is_reached(): void
     {
         config()->set('media.collections.cover', [

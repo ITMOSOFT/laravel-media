@@ -138,6 +138,7 @@ class MediaManager
 
         $storedPath = null;
         $newMedia = null;
+        $replacementCleanupStarted = false;
 
         try {
             $storedPath = $storage->putFileAs(
@@ -179,6 +180,8 @@ class MediaManager
             }
 
             if ($shouldReplace) {
+                $replacementCleanupStarted = true;
+
                 $currentMedia->each(
                     fn (Media $media) => $media->delete()
                 );
@@ -186,18 +189,20 @@ class MediaManager
 
             return $newMedia;
         } catch (Throwable $exception) {
-            if ($newMedia instanceof Media) {
+            if (! $replacementCleanupStarted) {
+                if ($newMedia instanceof Media) {
+                    try {
+                        $newMedia->delete();
+                    } catch (Throwable) {
+                        // Preserve the original exception.
+                    }
+                }
+
                 try {
-                    $newMedia->delete();
+                    $storage->delete($storedPath ?: $path);
                 } catch (Throwable) {
                     // Preserve the original exception.
                 }
-            }
-
-            try {
-                $storage->delete($storedPath ?: $path);
-            } catch (Throwable) {
-                // Preserve the original exception.
             }
 
             throw $exception;
