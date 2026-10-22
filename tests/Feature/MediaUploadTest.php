@@ -642,6 +642,63 @@ class MediaUploadTest extends TestCase
         );
     }
 
+    public function test_it_preserves_new_media_when_old_media_deletion_throws(): void
+    {
+        Storage::fake('local');
+        config()->set('media.disk', 'local');
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $oldMedia = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'old.pdf',
+                'old document'
+            )
+        )->toCollection('cover');
+
+        Media::deleting(function (Media $media) use ($oldMedia): void {
+            if ($media->is($oldMedia)) {
+                throw new \RuntimeException(
+                    'Simulated old-media cleanup failure.'
+                );
+            }
+        });
+
+        try {
+            $product->replaceMedia(
+                UploadedFile::fake()->createWithContent(
+                    'new.pdf',
+                    'new document'
+                ),
+                'cover'
+            );
+
+            $this->fail('Expected old-media cleanup to fail.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame(
+                'Simulated old-media cleanup failure.',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertDatabaseCount('media', 2);
+
+        $this->assertDatabaseHas('media', [
+            'id' => $oldMedia->id,
+        ]);
+
+        $newMedia = $product->fresh()->media()
+            ->where('id', '!=', $oldMedia->id)
+            ->first();
+
+        $this->assertNotNull($newMedia);
+
+        Storage::disk('local')->assertExists($newMedia->path);
+        Storage::disk('local')->assertMissing($oldMedia->path);
+    }
+
     public function test_it_keeps_existing_media_when_replacement_storage_fails(): void
     {
         $product = TestProduct::query()->create([
