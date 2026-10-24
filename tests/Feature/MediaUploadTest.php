@@ -422,6 +422,11 @@ class MediaUploadTest extends TestCase
 
         $filesystem = \Mockery::mock(Filesystem::class);
 
+        $filesystem->shouldReceive('files')
+            ->once()
+            ->with(dirname($media->path).'/conversions')
+            ->andReturn([]);
+
         $filesystem->shouldReceive('delete')
             ->once()
             ->with($media->path)
@@ -1308,6 +1313,7 @@ class MediaUploadTest extends TestCase
     public function test_it_preserves_media_record_when_conversion_deletion_returns_false(): void
     {
         Storage::fake('local');
+        $disk = Storage::disk('local');
 
         config()->set('media.disk', 'local');
         config()->set('media.conversions', [
@@ -1341,11 +1347,7 @@ class MediaUploadTest extends TestCase
 
         $filesystem = \Mockery::mock(Filesystem::class);
 
-        $filesystem->shouldReceive('delete')
-            ->once()
-            ->with($media->path)
-            ->andReturn(true);
-
+        // Conversion cleanup must happen before deleting the original.
         $filesystem->shouldReceive('files')
             ->once()
             ->with(dirname($media->path).'/conversions')
@@ -1375,6 +1377,9 @@ class MediaUploadTest extends TestCase
         $this->assertDatabaseHas('media', [
             'id' => $media->id,
         ]);
+
+        // The original file must survive the failed conversion cleanup.
+        $disk->assertExists($media->path);
     }
 
     public function test_deleting_media_removes_its_generated_conversion_files(): void

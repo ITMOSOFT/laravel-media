@@ -42,12 +42,6 @@ class Media extends Model
         static::deleting(function (self $media): void {
             $disk = Storage::disk($media->disk);
 
-            if (! $disk->delete($media->path)) {
-                throw new RuntimeException(
-                    "Failed to delete media file [{$media->path}]."
-                );
-            }
-
             $conversionDirectory = dirname($media->path).'/conversions';
 
             foreach ($disk->files($conversionDirectory) as $path) {
@@ -56,6 +50,12 @@ class Media extends Model
                         "Failed to delete media conversion [{$path}]."
                     );
                 }
+            }
+
+            if (! $disk->delete($media->path)) {
+                throw new RuntimeException(
+                    "Failed to delete media file [{$media->path}]."
+                );
             }
         });
     }
