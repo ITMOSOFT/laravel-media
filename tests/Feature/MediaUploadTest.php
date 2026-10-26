@@ -1081,6 +1081,53 @@ class MediaUploadTest extends TestCase
         ]);
     }
 
+    public function test_it_replaces_only_the_oldest_media_when_collection_limit_is_reached(): void
+    {
+        config()->set('media.collections.gallery', [
+            'max_files' => 2,
+            'on_limit' => 'replace',
+        ]);
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $first = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'first.pdf',
+                'first document'
+            )
+        )->toCollection('gallery');
+
+        $second = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'second.pdf',
+                'second document'
+            )
+        )->toCollection('gallery');
+
+        $third = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'third.pdf',
+                'third document'
+            )
+        )->toCollection('gallery');
+
+        $this->assertDatabaseCount('media', 2);
+
+        $this->assertDatabaseMissing('media', [
+            'id' => $first->id,
+        ]);
+
+        $this->assertDatabaseHas('media', [
+            'id' => $second->id,
+        ]);
+
+        $this->assertDatabaseHas('media', [
+            'id' => $third->id,
+        ]);
+    }
+
     public function test_it_allows_uploads_within_collection_limit(): void
     {
         config()->set('media.collections.gallery', [

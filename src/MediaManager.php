@@ -182,7 +182,11 @@ class MediaManager
             if ($shouldReplace) {
                 $replacementCleanupStarted = true;
 
-                $currentMedia->each(
+                $mediaToReplace = $currentMedia
+                    ->sortBy('order_column')
+                    ->take($currentCount - $maxFiles + 1);
+
+                $mediaToReplace->each(
                     fn (Media $media) => $media->delete()
                 );
             }
