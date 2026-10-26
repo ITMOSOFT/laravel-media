@@ -1081,6 +1081,102 @@ class MediaUploadTest extends TestCase
         ]);
     }
 
+    public function test_it_rejects_an_invalid_collection_on_limit_value(): void
+    {
+        config()->set('media.collections.gallery', [
+            'max_files' => 2,
+            'on_limit' => 'delete_all',
+        ]);
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'The collection on_limit setting must be reject or replace.'
+        );
+
+        $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'document.pdf',
+                'document content'
+            )
+        )->toCollection('gallery');
+    }
+
+    public function test_it_rejects_a_non_integer_collection_file_limit(): void
+    {
+        config()->set('media.collections.gallery', [
+            'max_files' => '2',
+            'on_limit' => 'reject',
+        ]);
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'The collection max_files setting must be a positive integer or null.'
+        );
+
+        $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'document.pdf',
+                'document content'
+            )
+        )->toCollection('gallery');
+    }
+
+    public function test_it_rejects_a_negative_collection_file_limit(): void
+    {
+        config()->set('media.collections.gallery', [
+            'max_files' => -1,
+            'on_limit' => 'reject',
+        ]);
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'The collection max_files setting must be a positive integer or null.'
+        );
+
+        $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'document.pdf',
+                'document content'
+            )
+        )->toCollection('gallery');
+    }
+
+    public function test_it_rejects_a_zero_collection_file_limit(): void
+    {
+        config()->set('media.collections.gallery', [
+            'max_files' => 0,
+            'on_limit' => 'reject',
+        ]);
+
+        $product = TestProduct::query()->create([
+            'name' => 'Test product',
+        ]);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'The collection max_files setting must be a positive integer or null.'
+        );
+
+        $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'document.pdf',
+                'document content'
+            )
+        )->toCollection('gallery');
+    }
+
     public function test_it_replaces_only_the_oldest_media_when_collection_limit_is_reached(): void
     {
         config()->set('media.collections.gallery', [
