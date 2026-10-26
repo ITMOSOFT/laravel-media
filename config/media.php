@@ -59,6 +59,17 @@ return [
 
     'delete_files_on_model_delete' => true,
 
+    /*
+    |--------------------------------------------------------------------------
+    | Media Collections
+    |--------------------------------------------------------------------------
+    |
+    | Each collection may define:
+    | - max_files: Maximum number of files allowed, or null for unlimited.
+    | - on_limit: "reject" to reject uploads at the limit, or "replace"
+    |   to replace the oldest existing media when the limit is reached.
+    |
+    */
     'collections' => [
         // Example:
         // 'cover' => [
