@@ -1,0 +1,60 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Laravel ${{ matrix.laravel }} / PHP 8.3
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - laravel: '12'
+            testbench: '10.*'
+          - laravel: '13'
+            testbench: '11.*'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, fileinfo, gd, pdo_sqlite, sqlite3
+          coverage: none
+          tools: composer:v2
+
+      - name: Show PHP and Composer versions
+        run: |
+          php --version
+          composer --version
+
+      - name: Install dependencies for Laravel ${{ matrix.laravel }}
+        run: |
+          composer update "orchestra/testbench:${{ matrix.testbench }}" \
+            --with-all-dependencies \
+            --prefer-dist \
+            --no-interaction
+
+      - name: Validate Composer configuration
+        run: composer validate --no-check-publish
+
+      - name: Verify installed Laravel version
+        run: |
+          composer show laravel/framework
+          composer show orchestra/testbench
+
+      - name: Run tests
+        run: composer test
