@@ -7,8 +7,10 @@ namespace ItmoSoft\Media\Concerns;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use ItmoSoft\Media\Models\Media;
 use ItmoSoft\Media\PendingMedia;
+use Throwable;
 
 trait HasMedia
 {
@@ -22,16 +24,28 @@ trait HasMedia
 
     protected static function bootHasMedia(): void
     {
-        static::deleting(function ($model): void {
+        static::deleted(function ($model): void {
             if (! config('media.delete_files_on_model_delete', true)) {
                 return;
             }
 
-            DB::transaction(function () use ($model): void {
-                $model->media()->get()->each(
-                    fn (Media $media) => $media->delete()
-                );
-            });
+            // Run only after the parent row was successfully deleted/soft-deleted.
+            // Media file cleanup itself is deferred until the transaction commits.
+            try {
+                DB::transaction(function () use ($model): void {
+                    $model->media()->get()->each(
+                        fn (Media $media) => $media->delete()
+                    );
+                });
+            } catch (Throwable $exception) {
+                // The parent row has already been deleted. Keep remaining media
+                // records/files intact and make the incomplete cleanup observable.
+                Log::warning('Failed to remove all media records after parent model deletion.', [
+                    'model_type' => $model::class,
+                    'model_id' => $model->getKey(),
+                    'exception' => $exception->getMessage(),
+                ]);
+            }
         });
     }
 
@@ -64,7 +78,7 @@ trait HasMedia
             );
         }
 
-        if (count($mediaIds) !== count(array_unique($mediaIds))) {
+        if (count(array_unique(array_map('strval', $mediaIds))) !== count($mediaIds)) {
             throw new \InvalidArgumentException(
                 'Duplicate media IDs are not allowed.'
             );
@@ -73,18 +87,37 @@ trait HasMedia
         DB::transaction(function () use ($mediaIds, $collection): void {
             $media = $this->media()
                 ->where('collection_name', $collection)
-                ->whereIn('id', $mediaIds)
+                ->orderBy('order_column')
+                ->orderBy('id')
+                ->lockForUpdate()
                 ->get()
                 ->keyBy('id');
 
-            if ($media->count() !== count($mediaIds)) {
-                throw new \InvalidArgumentException(
-                    'One or more media IDs do not belong to this model and collection.'
-                );
+            foreach ($mediaIds as $mediaId) {
+                if (! $media->has($mediaId)) {
+                    throw new \InvalidArgumentException(
+                        'One or more media IDs do not belong to this model and collection.'
+                    );
+                }
             }
 
-            foreach (array_values($mediaIds) as $index => $mediaId) {
-                $media->get($mediaId)->update([
+            // Partial reorder is supported: supplied IDs move to the front in
+            // the requested order; omitted records retain their relative order
+            // and follow the supplied IDs. Normalize every position to avoid ties.
+            $requestedIds = array_map('strval', $mediaIds);
+            $orderedMedia = collect($mediaIds)
+                ->map(fn ($mediaId) => $media->get($mediaId));
+
+            $omittedMedia = $media->reject(
+                fn (Media $item): bool => in_array(
+                    (string) $item->getKey(),
+                    $requestedIds,
+                    true
+                )
+            );
+
+            foreach ($orderedMedia->concat($omittedMedia)->values() as $index => $item) {
+                $item->update([
                     'order_column' => $index + 1,
                 ]);
             }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ItmoSoft\Media;
 
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Intervention\Image\Drivers\Gd\Driver;
 use Intervention\Image\ImageManager;
@@ -90,7 +91,7 @@ class MediaConversionManager
          * can restore them rather than deleting previously valid files.
          */
         $previousFiles = [];
-        $writtenPaths = [];
+        $attemptedPaths = [];
 
         foreach (array_keys($outputs) as $path) {
             $previousFiles[$path] = $disk->exists($path)
@@ -101,13 +102,15 @@ class MediaConversionManager
         $originalGeneratedConversions = $media->generated_conversions;
         try {
             foreach ($outputs as $path => $contents) {
+                // Track the path before writing: an adapter may partially write
+                // a file and still return false or throw.
+                $attemptedPaths[] = $path;
+
                 if (! $disk->put($path, $contents)) {
                     throw new RuntimeException(
                         "Unable to store media conversion at '{$path}'."
                     );
                 }
-
-                $writtenPaths[] = $path;
             }
 
             $generated = $media->generated_conversions ?? [];
@@ -124,17 +127,29 @@ class MediaConversionManager
             $media->save();
         } catch (Throwable $exception) {
             $media->generated_conversions = $originalGeneratedConversions;
-            foreach (array_reverse($writtenPaths) as $path) {
+            foreach (array_reverse($attemptedPaths) as $path) {
                 try {
                     $previous = $previousFiles[$path];
+                    $restored = is_string($previous)
+                        ? $disk->put($path, $previous)
+                        : $disk->delete($path);
 
-                    if (is_string($previous)) {
-                        $disk->put($path, $previous);
-                    } else {
-                        $disk->delete($path);
+                    if (
+                        ! $restored
+                        && (is_string($previous) || $disk->exists($path))
+                    ) {
+                        Log::warning('Media conversion rollback did not complete successfully.', [
+                            'media_id' => $media->getKey(),
+                            'path' => $path,
+                            'operation' => is_string($previous) ? 'restore' : 'delete',
+                        ]);
                     }
-                } catch (Throwable) {
-                    // Preserve the original exception.
+                } catch (Throwable $rollbackException) {
+                    Log::warning('An exception occurred while rolling back a media conversion write.', [
+                        'media_id' => $media->getKey(),
+                        'path' => $path,
+                        'exception' => $rollbackException->getMessage(),
+                    ]);
                 }
             }
 

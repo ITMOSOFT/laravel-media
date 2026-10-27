@@ -6,9 +6,12 @@ namespace ItmoSoft\Media\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use RuntimeException;
+use Throwable;
 
 class Media extends Model
 {
@@ -39,25 +42,69 @@ class Media extends Model
             $media->uuid ??= (string) Str::uuid();
         });
 
-        static::deleting(function (self $media): void {
-            $disk = Storage::disk($media->disk);
-
-            $conversionDirectory = dirname($media->path).'/conversions';
-
-            foreach ($disk->files($conversionDirectory) as $path) {
-                if (! $disk->delete($path)) {
-                    throw new RuntimeException(
-                        "Failed to delete media conversion [{$path}]."
-                    );
-                }
-            }
-
-            if (! $disk->delete($media->path)) {
-                throw new RuntimeException(
-                    "Failed to delete media file [{$media->path}]."
-                );
-            }
+        static::deleted(function (self $media): void {
+            // A filesystem and a database cannot participate in one atomic
+            // transaction. Delete the database row first, then clean up files
+            // after the surrounding transaction commits. A cleanup failure can
+            // leave an orphaned file, but never a row pointing to a missing file.
+            DB::afterCommit(function () use ($media): void {
+                $media->cleanupStoredFiles();
+            });
         });
+    }
+
+    private function cleanupStoredFiles(): void
+    {
+        try {
+            $disk = Storage::disk($this->disk);
+        } catch (Throwable $exception) {
+            Log::warning('Unable to access the media disk during post-delete cleanup.', [
+                'media_id' => $this->getKey(),
+                'disk' => $this->disk,
+                'exception' => $exception->getMessage(),
+            ]);
+            return;
+        }
+
+        $conversionDirectory = dirname($this->path).'/conversions';
+        try {
+            $conversionPaths = $disk->files($conversionDirectory);
+        } catch (Throwable $exception) {
+            $conversionPaths = [];
+            Log::warning('Unable to enumerate media conversions during post-delete cleanup.', [
+                'media_id' => $this->getKey(),
+                'directory' => $conversionDirectory,
+                'exception' => $exception->getMessage(),
+            ]);
+        }
+
+        foreach ($conversionPaths as $path) {
+            $this->deleteStoredFile($disk, $path, 'conversion');
+        }
+
+        $this->deleteStoredFile($disk, $this->path, 'original');
+    }
+
+    private function deleteStoredFile(mixed $disk, string $path, string $kind): void
+    {
+        try {
+            if (! $disk->delete($path) && $disk->exists($path)) {
+                Log::warning('A file could not be removed after its media record was deleted.', [
+                    'media_id' => $this->getKey(),
+                    'disk' => $this->disk,
+                    'path' => $path,
+                    'file_type' => $kind,
+                ]);
+            }
+        } catch (Throwable $exception) {
+            Log::warning('An exception occurred while removing a file after its media record was deleted.', [
+                'media_id' => $this->getKey(),
+                'disk' => $this->disk,
+                'path' => $path,
+                'file_type' => $kind,
+                'exception' => $exception->getMessage(),
+            ]);
+        }
     }
 
     public function model(): MorphTo

@@ -5,10 +5,13 @@ declare(strict_types=1);
 namespace ItmoSoft\Media\Tests\Feature;
 
 use Illuminate\Contracts\Filesystem\Filesystem;
+use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Events\Dispatcher;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Intervention\Image\Drivers\Gd\Driver;
@@ -122,6 +125,10 @@ class MediaUploadTest extends TestCase
             ->once()
             ->andReturn(false);
 
+        $filesystem->shouldReceive('files')
+            ->once()
+            ->andReturn([]);
+
         $filesystem->shouldReceive('delete')
             ->once()
             ->with(\Mockery::type('string'))
@@ -170,6 +177,15 @@ class MediaUploadTest extends TestCase
             ->once()
             ->andThrow(new RuntimeException('Simulated storage failure.'));
 
+        $filesystem->shouldReceive('files')
+            ->once()
+            ->andReturn([]);
+
+        $filesystem->shouldReceive('delete')
+            ->once()
+            ->with(\Mockery::type('string'))
+            ->andReturn(true);
+
         Storage::shouldReceive('disk')
             ->once()
             ->with('local')
@@ -188,6 +204,44 @@ class MediaUploadTest extends TestCase
                 'Simulated storage failure.',
                 $exception->getMessage()
             );
+        }
+
+        $this->assertDatabaseCount('media', 0);
+    }
+
+    public function test_it_logs_failed_upload_cleanup_without_masking_the_original_exception(): void
+    {
+        $product = TestProduct::query()->create(['name' => 'Test product']);
+        config()->set('media.disk', 'local');
+        config()->set('media.allowed_mime_types', ['application/pdf']);
+
+        $filesystem = \Mockery::mock(Filesystem::class);
+        $filesystem->shouldReceive('putFileAs')
+            ->once()
+            ->andThrow(new RuntimeException('Original upload failure.'));
+        $filesystem->shouldReceive('files')
+            ->once()
+            ->andReturn([]);
+        $filesystem->shouldReceive('delete')
+            ->once()
+            ->with(\Mockery::type('string'))
+            ->andReturn(false);
+        $filesystem->shouldReceive('exists')
+            ->once()
+            ->with(\Mockery::type('string'))
+            ->andReturn(true);
+        Storage::shouldReceive('disk')->once()->with('local')->andReturn($filesystem);
+        Log::shouldReceive('warning')->once();
+
+        try {
+            app(MediaManager::class)->upload(
+                $product,
+                UploadedFile::fake()->createWithContent('document.pdf', 'content'),
+                'documents'
+            );
+            $this->fail('Expected the original upload exception.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Original upload failure.', $exception->getMessage());
         }
 
         $this->assertDatabaseCount('media', 0);
@@ -375,6 +429,35 @@ class MediaUploadTest extends TestCase
         );
     }
 
+    public function test_failed_media_delete_does_not_remove_the_original_file(): void
+    {
+        Storage::fake('local');
+        config()->set('media.disk', 'local');
+        config()->set('media.allowed_mime_types', ['application/pdf']);
+
+        $product = TestProduct::query()->create(['name' => 'Test product']);
+        $media = $product->addMedia(
+            UploadedFile::fake()->createWithContent('document.pdf', 'content')
+        )->toCollection('documents');
+        $path = $media->path;
+
+        Media::deleting(function (Media $deletingMedia) use ($media): void {
+            if ($deletingMedia->is($media)) {
+                throw new RuntimeException('Simulated database deletion failure.');
+            }
+        });
+
+        try {
+            $media->delete();
+            $this->fail('Expected deletion to be cancelled.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Simulated database deletion failure.', $exception->getMessage());
+        }
+
+        $this->assertDatabaseHas('media', ['id' => $media->id]);
+        Storage::disk('local')->assertExists($path);
+    }
+
     public function test_deleting_media_removes_its_stored_file(): void
     {
         Storage::fake('local');
@@ -407,7 +490,7 @@ class MediaUploadTest extends TestCase
         Storage::disk('local')->assertMissing($path);
     }
 
-    public function test_it_preserves_media_record_when_file_deletion_returns_false(): void
+    public function test_it_deletes_media_record_and_logs_when_file_cleanup_returns_false(): void
     {
         $product = TestProduct::query()->create([
             'name' => 'Test product',
@@ -421,35 +504,56 @@ class MediaUploadTest extends TestCase
         )->toCollection('documents');
 
         $filesystem = \Mockery::mock(Filesystem::class);
-
         $filesystem->shouldReceive('files')
             ->once()
             ->with(dirname($media->path).'/conversions')
             ->andReturn([]);
-
         $filesystem->shouldReceive('delete')
             ->once()
             ->with($media->path)
             ->andReturn(false);
+        $filesystem->shouldReceive('exists')
+            ->once()
+            ->with($media->path)
+            ->andReturn(true);
 
         Storage::shouldReceive('disk')
             ->once()
             ->with($media->disk)
             ->andReturn($filesystem);
+        Log::shouldReceive('warning')->once();
 
-        try {
-            $media->delete();
-            $this->fail('Expected media file deletion to throw an exception.');
-        } catch (RuntimeException $exception) {
-            $this->assertStringContainsString(
-                'Failed to delete media file',
-                $exception->getMessage()
-            );
-        }
+        $media->delete();
 
-        $this->assertDatabaseHas('media', [
+        $this->assertDatabaseMissing('media', [
             'id' => $media->id,
         ]);
+    }
+
+    public function test_parent_deletion_logs_failed_media_cleanup_without_deleting_files(): void
+    {
+        Storage::fake('local');
+        config()->set('media.disk', 'local');
+        config()->set('media.allowed_mime_types', ['application/pdf']);
+
+        $product = TestProduct::query()->create(['name' => 'Test product']);
+        $media = $product->addMedia(
+            UploadedFile::fake()->createWithContent('document.pdf', 'content')
+        )->toCollection('documents');
+        $path = $media->path;
+
+        Media::deleting(function (Media $deletingMedia) use ($media): void {
+            if ($deletingMedia->is($media)) {
+                throw new RuntimeException('Simulated media row deletion failure.');
+            }
+        });
+        Log::shouldReceive('warning')->once();
+
+        $product->delete();
+
+        $this->assertDatabaseMissing('test_products', ['id' => $product->id]);
+        $this->assertDatabaseHas('media', ['id' => $media->id]);
+        Storage::disk('local')->assertExists($path);
     }
 
     public function test_deleting_parent_model_removes_its_media_files(): void
@@ -742,7 +846,7 @@ class MediaUploadTest extends TestCase
         $this->assertNotNull($newMedia);
 
         Storage::disk('local')->assertExists($newMedia->path);
-        Storage::disk('local')->assertMissing($oldMedia->path);
+        Storage::disk('local')->assertExists($oldMedia->path);
     }
 
     public function test_it_keeps_existing_media_when_replacement_storage_fails(): void
@@ -773,6 +877,10 @@ class MediaUploadTest extends TestCase
             ->once()
             ->andThrow(new RuntimeException('Simulated storage failure.'));
 
+        $filesystem->shouldReceive('files')
+            ->once()
+            ->andReturn([]);
+
         $filesystem->shouldReceive('delete')
             ->once()
             ->with(\Mockery::type('string'))
@@ -799,6 +907,97 @@ class MediaUploadTest extends TestCase
             'id' => $oldMedia->id,
             'path' => $oldPath,
         ]);
+    }
+
+    public function test_partial_reordering_moves_requested_items_first_and_preserves_omitted_order(): void
+    {
+        $product = TestProduct::query()->create(['name' => 'Test product']);
+        $first = $product->addMedia(UploadedFile::fake()->createWithContent('first.pdf', 'first'))->toCollection('gallery');
+        $second = $product->addMedia(UploadedFile::fake()->createWithContent('second.pdf', 'second'))->toCollection('gallery');
+        $third = $product->addMedia(UploadedFile::fake()->createWithContent('third.pdf', 'third'))->toCollection('gallery');
+        $fourth = $product->addMedia(UploadedFile::fake()->createWithContent('fourth.pdf', 'fourth'))->toCollection('gallery');
+
+        $product->reorderMedia([$third->id, $first->id], 'gallery');
+
+        $this->assertSame(
+            [$third->id, $first->id, $second->id, $fourth->id],
+            $product->getMedia('gallery')->pluck('id')->all()
+        );
+        $this->assertSame([1, 2, 3, 4], $product->getMedia('gallery')->pluck('order_column')->all());
+    }
+
+    public function test_upload_inserts_media_inside_a_transaction_for_limit_serialization(): void
+    {
+        $product = TestProduct::query()->create(['name' => 'Test product']);
+        $transactionWasActive = false;
+
+        Media::creating(function () use (&$transactionWasActive): void {
+            $transactionWasActive = DB::transactionLevel() > 0;
+        });
+
+        $product->addMedia(
+            UploadedFile::fake()->createWithContent('document.pdf', 'content')
+        )->toCollection('documents');
+
+        $this->assertTrue($transactionWasActive);
+    }
+
+    public function test_upload_supports_collection_names_containing_dots(): void
+    {
+        config()->set('media.collections', [
+            'product.gallery' => ['max_files' => 1, 'on_limit' => 'reject'],
+        ]);
+        $product = TestProduct::query()->create(['name' => 'Test product']);
+        $media = $product->addMedia(
+            UploadedFile::fake()->createWithContent('photo.pdf', 'content')
+        )->toCollection('product.gallery');
+
+        $this->assertSame('product.gallery', $media->collection_name);
+    }
+
+    public function test_upload_rejects_invalid_max_file_size_configuration(): void
+    {
+        config()->set('media.max_file_size', -1);
+        $product = TestProduct::query()->create(['name' => 'Test product']);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('max_file_size setting must be a positive integer');
+        $product->addMedia(
+            UploadedFile::fake()->createWithContent('document.pdf', 'content')
+        )->toCollection('documents');
+    }
+
+    public function test_parent_delete_failure_does_not_remove_media_records_or_files(): void
+    {
+        Storage::fake('local');
+        config()->set('media.disk', 'local');
+        config()->set('media.allowed_mime_types', ['application/pdf']);
+
+        Schema::create('test_restricts', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('test_product_id')->constrained('test_products');
+        });
+
+        $product = TestProduct::query()->create(['name' => 'Test product']);
+        $media = $product->addMedia(
+            UploadedFile::fake()->createWithContent('document.pdf', 'content')
+        )->toCollection('documents');
+        $path = $media->path;
+
+        DB::table('test_restricts')->insert([
+            'test_product_id' => $product->id,
+        ]);
+
+        try {
+            $product->delete();
+            $this->fail('Expected parent deletion to fail because of the foreign key.');
+        } catch (QueryException) {
+            // The parent row and its media must remain intact.
+        }
+
+        $this->assertDatabaseHas('test_products', ['id' => $product->id]);
+        $this->assertDatabaseHas('media', ['id' => $media->id]);
+        Storage::disk('local')->assertExists($path);
     }
 
     public function test_it_reorders_media_within_a_collection(): void
@@ -878,19 +1077,45 @@ class MediaUploadTest extends TestCase
             'name' => 'Test product',
         ]);
 
-        $media = $product->addMedia(
+        $first = $product->addMedia(
             UploadedFile::fake()->createWithContent(
-                'document.pdf',
-                'document content'
+                'first.pdf',
+                'first document'
             )
         )->toCollection('gallery');
 
-        $this->expectException(\InvalidArgumentException::class);
+        $second = $product->addMedia(
+            UploadedFile::fake()->createWithContent(
+                'second.pdf',
+                'second document'
+            )
+        )->toCollection('gallery');
 
-        $product->reorderMedia([
-            $media->id,
-            $media->id,
-        ], 'gallery');
+        $originalOrder = $product->getMedia('gallery')
+            ->pluck('id')
+            ->all();
+
+        try {
+            $product->reorderMedia([
+                $second->id,
+                $second->id,
+            ], 'gallery');
+
+            $this->fail('Expected duplicate media IDs to be rejected.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertSame(
+                'Duplicate media IDs are not allowed.',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(
+            $originalOrder,
+            $product->getMedia('gallery')->pluck('id')->all()
+        );
+
+        $this->assertSame(1, $first->fresh()->order_column);
+        $this->assertSame(2, $second->fresh()->order_column);
     }
 
     public function test_it_rejects_media_belonging_to_another_model_when_reordering(): void
@@ -985,7 +1210,7 @@ class MediaUploadTest extends TestCase
         )->toCollection('cover');
     }
 
-    public function test_it_preserves_new_media_when_old_media_cleanup_fails(): void
+    public function test_it_rolls_back_collection_replacement_when_old_media_delete_is_cancelled(): void
     {
         Storage::fake('local');
         config()->set('media.disk', 'local');
@@ -1004,14 +1229,11 @@ class MediaUploadTest extends TestCase
                 'old document'
             )
         )->toCollection('cover');
-
         $oldPath = $oldMedia->path;
 
         Media::deleting(function (Media $media) use ($oldMedia): void {
             if ($media->is($oldMedia)) {
-                throw new RuntimeException(
-                    'Simulated old-media cleanup failure.'
-                );
+                throw new RuntimeException('Simulated old-media delete failure.');
             }
         });
 
@@ -1022,28 +1244,18 @@ class MediaUploadTest extends TestCase
                     'new document'
                 )
             )->toCollection('cover');
-
-            $this->fail('Expected old-media cleanup to fail.');
+            $this->fail('Expected old-media deletion to fail.');
         } catch (RuntimeException $exception) {
             $this->assertSame(
-                'Simulated old-media cleanup failure.',
+                'Simulated old-media delete failure.',
                 $exception->getMessage()
             );
         }
 
-        $this->assertDatabaseHas('media', [
-            'id' => $oldMedia->id,
-        ]);
-
-        $this->assertDatabaseCount('media', 2);
-
-        $newMedia = $product->fresh()->media()
-            ->where('path', '!=', $oldPath)
-            ->first();
-
-        $this->assertNotNull($newMedia);
-
-        Storage::disk('local')->assertExists($newMedia->path);
+        $this->assertDatabaseCount('media', 1);
+        $this->assertDatabaseHas('media', ['id' => $oldMedia->id]);
+        Storage::disk('local')->assertExists($oldPath);
+        $this->assertCount(1, Storage::disk('local')->allFiles('media'));
     }
 
     public function test_it_replaces_existing_media_when_collection_limit_is_reached(): void
@@ -1280,6 +1492,10 @@ class MediaUploadTest extends TestCase
             ->once()
             ->andThrow(new RuntimeException('Simulated storage failure.'));
 
+        $filesystem->shouldReceive('files')
+            ->once()
+            ->andReturn([]);
+
         $filesystem->shouldReceive('delete')
             ->once()
             ->with(\Mockery::type('string'))
@@ -1426,7 +1642,16 @@ class MediaUploadTest extends TestCase
         $filesystem->shouldReceive('put')
             ->once()
             ->with($directory.'/medium.webp', \Mockery::type('string'))
-            ->andReturn(false);
+            ->andReturnUsing(function (string $path, string $contents) use ($disk): bool {
+                $disk->put($path, $contents); // Simulate a partial write before failure.
+
+                return false;
+            });
+
+        $filesystem->shouldReceive('delete')
+            ->once()
+            ->with($directory.'/medium.webp')
+            ->andReturnUsing(fn (string $path): bool => $disk->delete($path));
 
         $filesystem->shouldReceive('delete')
             ->once()
@@ -1453,7 +1678,7 @@ class MediaUploadTest extends TestCase
         $disk->assertExists($media->path);
     }
 
-    public function test_it_preserves_media_record_when_conversion_deletion_returns_false(): void
+    public function test_it_deletes_media_record_and_logs_when_conversion_cleanup_fails(): void
     {
         Storage::fake('local');
         $disk = Storage::disk('local');
@@ -1468,61 +1693,48 @@ class MediaUploadTest extends TestCase
             ],
         ]);
 
-        $product = TestProduct::query()->create([
-            'name' => 'Test product',
-        ]);
-
+        $product = TestProduct::query()->create(['name' => 'Test product']);
         $image = (new ImageManager(new Driver))
             ->create(400, 300)
             ->fill('#336699');
-
         $media = $product->addMedia(
             UploadedFile::fake()->createWithContent(
                 'photo.png',
                 $image->toPng()->toString(),
             )
         )->toCollection('gallery');
-
         app(MediaConversionManager::class)->generate($media);
 
-        $conversionPath = dirname($media->path)
-            .'/conversions/thumb.webp';
-
+        $conversionPath = dirname($media->path).'/conversions/thumb.webp';
         $filesystem = \Mockery::mock(Filesystem::class);
-
-        // Conversion cleanup must happen before deleting the original.
         $filesystem->shouldReceive('files')
             ->once()
             ->with(dirname($media->path).'/conversions')
             ->andReturn([$conversionPath]);
-
         $filesystem->shouldReceive('delete')
             ->once()
             ->with($conversionPath)
             ->andReturn(false);
-
+        $filesystem->shouldReceive('exists')
+            ->once()
+            ->with($conversionPath)
+            ->andReturn(true);
+        $filesystem->shouldReceive('delete')
+            ->once()
+            ->with($media->path)
+            ->andReturn(true);
         Storage::shouldReceive('disk')
             ->once()
             ->with($media->disk)
             ->andReturn($filesystem);
+        Log::shouldReceive('warning')->once();
 
-        try {
-            $media->delete();
+        $media->delete();
 
-            $this->fail('Expected conversion deletion to throw an exception.');
-        } catch (RuntimeException $exception) {
-            $this->assertStringContainsString(
-                'Failed to delete media conversion',
-                $exception->getMessage(),
-            );
-        }
-
-        $this->assertDatabaseHas('media', [
-            'id' => $media->id,
-        ]);
-
-        // The original file must survive the failed conversion cleanup.
-        $disk->assertExists($media->path);
+        $this->assertDatabaseMissing('media', ['id' => $media->id]);
+        // The mocked disk reports successful original-file cleanup. The failed
+        // conversion cleanup is logged rather than aborting the database delete.
+        $disk->assertExists($conversionPath);
     }
 
     public function test_deleting_media_removes_its_generated_conversion_files(): void
@@ -1823,6 +2035,53 @@ class MediaUploadTest extends TestCase
             dirname($oldPath).'/conversions/thumb.webp'
         );
         $this->assertStringNotContainsString('broken-cover', implode(' ', $files));
+    }
+
+    public function test_it_logs_conversion_rollback_failure_and_preserves_the_original_exception(): void
+    {
+        Storage::fake('local');
+        config()->set('media.disk', 'local');
+        config()->set('media.conversions', [
+            'thumb' => [
+                'width' => 150,
+                'height' => 150,
+                'format' => 'webp',
+                'quality' => 80,
+            ],
+        ]);
+
+        $product = TestProduct::query()->create(['name' => 'Test product']);
+        $image = (new ImageManager(new Driver))->create(400, 300)->fill('#336699');
+        $media = $product->addMedia(
+            UploadedFile::fake()->createWithContent('photo.png', $image->toPng()->toString())
+        )->toCollection('gallery');
+        $realDisk = Storage::disk('local');
+        $conversionPath = dirname($media->path).'/conversions/thumb.webp';
+
+        $filesystem = \Mockery::mock(Filesystem::class);
+        $filesystem->shouldReceive('exists')->with($media->path)->once()->andReturn(true);
+        $filesystem->shouldReceive('get')->with($media->path)->once()->andReturn($realDisk->get($media->path));
+        $filesystem->shouldReceive('exists')->with($conversionPath)->twice()->andReturn(false, true);
+        $filesystem->shouldReceive('put')->with($conversionPath, \Mockery::type('string'))->once()->andReturn(true);
+        $filesystem->shouldReceive('delete')->with($conversionPath)->once()->andReturn(false);
+        Storage::shouldReceive('disk')->once()->with('local')->andReturn($filesystem);
+        Log::shouldReceive('warning')->once();
+
+        $originalDispatcher = Media::getEventDispatcher();
+        Media::updating(function (Media $model) use ($media): void {
+            if ($model->is($media)) {
+                throw new RuntimeException('Original metadata save failure.');
+            }
+        });
+
+        try {
+            app(MediaConversionManager::class)->generate($media);
+            $this->fail('Expected metadata save failure.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Original metadata save failure.', $exception->getMessage());
+        } finally {
+            Media::setEventDispatcher($originalDispatcher);
+        }
     }
 
     public function test_it_restores_conversion_metadata_when_saving_fails(): void
